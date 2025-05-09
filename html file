@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Set Fitness Goal</title>
+</head>
+<body>
+    <h2>Choose a Goal Mode</h2>
+    <form method="POST">
+        <label><input type="radio" name="mode" value="Strength" checked> Strength Building</label><br>
+        <label><input type="radio" name="mode" value="Mass"> Mass Building</label><br>
+        <label><input type="radio" name="mode" value="Custom"> Custom</label><br><br>
+
+        <div>
+            <label>Custom Reps:</label>
+            <input type="number" name="reps"><br>
+            <label>Custom Sets:</label>
+            <input type="number" name="sets"><br>
+            <label>Rest Time (sec):</label>
+            <input type="number" name="rest_time"><br>
+        </div>
+
+        <br><button type="submit">Set Goal</button>
+    </form>
+</body>
+</html>
