@@ -1,0 +1,172 @@
+import asyncio
+import threading
+import time
+import RPi.GPIO as GPIO
+from flask import Flask, request, render_template, redirect, url_for, jsonify
+from bleak import BleakScanner, BleakClient
+
+goal = {
+    'mode': 'Strength',
+    'reps': 6,
+    'sets': 3,
+    'rest_time': 120
+}
+
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "<h2>LyftSync Flask API is running.</h2><p>Use /set_goal or /api/set_goal to configure a workout.</p>"
+
+@app.route('/set_goal', methods=['GET', 'POST'])
+def set_goal():
+    global goal
+    if request.method == 'POST':
+        mode = request.form.get('mode', 'Custom')
+        if mode == 'Strength':
+            goal = {'mode': 'Strength', 'reps': 6, 'sets': 3, 'rest_time': 120}
+        elif mode == 'Mass':
+            goal = {'mode': 'Mass', 'reps': 10, 'sets': 4, 'rest_time': 60}
+        elif mode == 'Custom':
+            goal = {
+                'mode': 'Custom',
+                'reps': int(request.form.get('reps', 0)),
+                'sets': int(request.form.get('sets', 0)),
+                'rest_time': int(request.form.get('rest_time', 0))
+            }
+        print("HTML API Updated:", goal)
+        return redirect(url_for('view_goal'))
+    return render_template('set_goal.html', goal=goal)
+
+@app.route('/goal')
+def view_goal():
+    return f"""
+    <h3>Current Goal</h3>
+    <p>Mode: {goal['mode']}<br>
+    Reps: {goal['reps']}<br>
+    Sets: {goal['sets']}<br>
+    Rest Time: {goal['rest_time']} sec</p>
+    """
+
+@app.route('/api/goal', methods=['GET'])
+def api_get_goal():
+    return jsonify(goal)
+
+
+TARGET_NAME = "FeatherReps"
+UART_RX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+UART_TX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+MOTOR_PIN = 18
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(MOTOR_PIN, GPIO.OUT)
+GPIO.output(MOTOR_PIN, GPIO.LOW)
+
+currentRep = 0
+currentSet = 1
+ble_client = None
+
+
+def short_buzz():
+    GPIO.output(MOTOR_PIN, GPIO.HIGH)
+    asyncio.get_event_loop().call_later(0.1, lambda: GPIO.output(MOTOR_PIN, GPIO.LOW))
+
+def pulse_buzz(pulses=3):
+    for i in range(pulses):
+        asyncio.get_event_loop().call_later(i * 0.15, lambda: GPIO.output(MOTOR_PIN, GPIO.HIGH))
+        asyncio.get_event_loop().call_later(i * 0.15 + 0.05, lambda: GPIO.output(MOTOR_PIN, GPIO.LOW))
+
+def long_buzz():
+    GPIO.output(MOTOR_PIN, GPIO.HIGH)
+    asyncio.get_event_loop().call_later(0.8, lambda: GPIO.output(MOTOR_PIN, GPIO.LOW))
+
+def double_long_buzz():
+    long_buzz()
+    asyncio.get_event_loop().call_later(1.2, long_buzz)
+
+async def send_feedback(command):
+    global ble_client
+    if ble_client is None:
+        return
+    try:
+        await ble_client.write_gatt_char(UART_TX_CHAR_UUID, (command + '\n').encode())
+        print(f" To Feather {command}")
+    except Exception as e:
+        print(f" Failed {command}:", e)
+
+def handle_rx(_, data):
+    global current_rep, current_set
+
+    msg = data.decode().strip()
+    print("Received from feather:", msg)
+
+    if msg == "REP_GOOD":
+        current_rep += 1
+        print(f" Rep {current_rep}/{goal['reps']}")
+        short_buzz()
+        asyncio.create_task(send_feedback("BUZZ_SHORT"))
+
+    elif msg == "REP_FAST":
+        current_rep += 1
+        print(f" Too fast! {current_rep}/{goal['reps']}")
+        pulse_buzz()
+        asyncio.create_task(send_feedback("BUZZ_PULSE"))
+
+    if current_rep >= goal['reps']:
+        print(f" Set {current_set} Done. Send: BUZZ_DOUBLE_LONG")
+        asyncio.create_task(send_feedback("BUZZ_DOUBLE_LONG"))
+        double_long_buzz()
+        current_rep = 0
+
+        if current_set == goal['sets']:
+            def finish():
+                print("Finished Workout!")
+            asyncio.get_event_loop().call_later(2, finish)
+            return
+
+        print(f" Resting {goal['rest_time']}s before set {current_set + 1}")
+
+        def start_next_set():
+            global current_set
+            current_set += 1
+            print(f" Start Set! {current_set}")
+            asyncio.create_task(send_feedback("BUZZ_LONG"))
+            long_buzz()
+
+        asyncio.get_event_loop().call_later(goal['rest_time'], start_next_set)
+
+
+async def run_ble():
+    global ble_client
+    print("scanning for feather")
+    devices = await BleakScanner.discover()
+    feather = next((d for d in devices if d.name == TARGET_NAME), None)
+
+    if not feather:
+        print("feather not found")
+        return
+
+    async with BleakClient(feather.address) as client:
+        ble_client = client
+        print(f"connected successfully: {feather.name}")
+        await client.start_notify(UART_RX_CHAR_UUID, handle_rx)
+        print("active...")
+
+        while True:
+            await asyncio.sleep(1)
+
+
+def start_flask():
+    app.run(host="0.0.0.0", port=5000, debug=False)
+
+
+if __name__ == '__main__':
+    flask_thread = threading.Thread(target=start_flask, daemon=True)
+    flask_thread.start()
+
+    try:
+        asyncio.run(run_ble())
+    except KeyboardInterrupt:
+        print("Exitting")
+        GPIO.cleanup()
